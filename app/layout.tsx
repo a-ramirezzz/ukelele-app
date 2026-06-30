@@ -20,9 +20,23 @@ const playfair = Playfair_Display({
   variable: '--font-script',
 })
 
+// Set NEXT_PUBLIC_SITE_URL in your Vercel environment variables to your deployment URL
+// e.g. https://your-app.vercel.app
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
   title: 'Ukelele de Leslie',
   description: 'Un ukelele virtual interactivo',
+  openGraph: {
+    title: 'Ukelele de Leslie',
+    description: 'Un ukelele virtual interactivo',
+    images: [{ url: '/images/og-image.png', width: 1200, height: 630 }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Ukelele de Leslie',
+    description: 'Un ukelele virtual interactivo',
+    images: ['/images/og-image.png'],
+  },
 }
 
 export default function RootLayout({
