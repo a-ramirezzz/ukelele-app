@@ -2,7 +2,8 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { useState, useCallback, useRef, useEffect } from "react";
-import { playUkuleleNote } from "@/lib/ukuleleAudio";
+import { playUkuleleNote, triggerHapticPluck } from "@/lib/ukuleleAudio";
+import EqualizerPanel from "@/components/EqualizerPanel";
 
 const STRING_DATA = [
   { note: "G", freq: 392.0, color: "#FF6B9D", type: "heart" as const },
@@ -61,6 +62,14 @@ interface Particle {
   angle: number;
   angularVel: number;
   phase: number;
+}
+
+interface StrumState {
+  startX: number;
+  startY: number;
+  startTime: number;
+  stringsHit: number[];
+  isStrumGesture: boolean;
 }
 
 interface AmbientDot {
@@ -151,6 +160,8 @@ export default function UkelelePage() {
   const messageTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const milestoneTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const ukeRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const strumStateRef = useRef<StrumState | null>(null);
   const spotlightOffsetRef = useRef(0);
   const mouseRef = useRef({ x: 0.3, y: 0.25 });
   const [stringPaths, setStringPaths] = useState<string[]>(
@@ -419,8 +430,9 @@ export default function UkelelePage() {
     }, 55);
   }, []);
 
-  const pluckString = useCallback((idx: number) => {
-    try { playUkuleleNote(STRING_DATA[idx].freq); } catch {}
+  const pluckString = useCallback((idx: number, velocity = 1) => {
+    try { playUkuleleNote(STRING_DATA[idx].freq, 1.2, velocity); } catch {}
+    triggerHapticPluck(velocity);
     setVibratingStrings((prev) => new Set(prev).add(idx));
     animateString(idx);
     setTimeout(() => setVibratingStrings((prev) => { const n = new Set(prev); n.delete(idx); return n; }), 340);
@@ -433,6 +445,65 @@ export default function UkelelePage() {
 
     handleNoteCount(STRING_DATA[idx].color);
   }, [emitParticles, getStringOrigin, handleNoteCount, animateString]);
+
+  const getSvgX = useCallback((clientX: number): number => {
+    const svg = svgRef.current;
+    if (!svg) return 0;
+    const rect = svg.getBoundingClientRect();
+    return (clientX - rect.left) / rect.width * 260;
+  }, []);
+
+  const handleStrumPointerDown = useCallback((e: React.PointerEvent<SVGRectElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const svgX = getSvgX(e.clientX);
+    const idx = getStringIdxFromSvgX(svgX);
+    strumStateRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startTime: Date.now(),
+      stringsHit: idx !== null ? [idx] : [],
+      isStrumGesture: false,
+    };
+  }, [getSvgX]);
+
+  const handleStrumPointerMove = useCallback((e: React.PointerEvent<SVGRectElement>) => {
+    const state = strumStateRef.current;
+    if (!state) return;
+    const svgX = getSvgX(e.clientX);
+    const idx = getStringIdxFromSvgX(svgX);
+    if (idx !== null && !state.stringsHit.includes(idx)) {
+      state.stringsHit.push(idx);
+      if (state.stringsHit.length >= 2) {
+        state.isStrumGesture = true;
+      }
+    }
+  }, [getSvgX]);
+
+  const handleStrumPointerUp = useCallback((e: React.PointerEvent<SVGRectElement>) => {
+    const state = strumStateRef.current;
+    strumStateRef.current = null;
+    if (!state) return;
+
+    const dt = (Date.now() - state.startTime) / 1000;
+    const dx = e.clientX - state.startX;
+    const dy = e.clientY - state.startY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const speed = dt > 0 ? dist / dt : 0;
+    const rawVelocity = speed / 400;
+
+    if (state.isStrumGesture) {
+      const velocity = Math.max(0.3, Math.min(1.0, rawVelocity));
+      state.stringsHit.forEach((idx, i) => {
+        setTimeout(() => pluckString(idx, velocity), i * 30);
+      });
+    } else {
+      const idx = state.stringsHit[0] ?? null;
+      if (idx !== null) {
+        const velocity = dist < 10 ? 0.85 : Math.max(0.3, Math.min(1.0, rawVelocity));
+        pluckString(idx, velocity);
+      }
+    }
+  }, [getSvgX, pluckString]);
 
   const playChord = useCallback((chord: typeof CHORDS[0]) => {
     chord.freqs.forEach((freq, i) => {
@@ -554,7 +625,7 @@ export default function UkelelePage() {
             )}
           </AnimatePresence>
 
-          <svg viewBox="0 0 260 500" className="w-full h-full" style={{ filter: "drop-shadow(0 8px 24px rgba(0,0,0,0.6))" }}>
+          <svg ref={svgRef} viewBox="0 0 260 500" className="w-full h-full" style={{ filter: "drop-shadow(0 8px 24px rgba(0,0,0,0.6))" }}>
             <defs>
               <linearGradient id="bodyGrad" x1="0" y1="0" x2="0.2" y2="1">
                 <stop offset="0%" stopColor="#D4892A" />
@@ -699,10 +770,8 @@ export default function UkelelePage() {
                 <g key={`string-${i}`}>
                   <rect
                     x={x - hitW / 2} y={55} width={hitW} height={320}
-                    fill="transparent" cursor="pointer"
-                    style={{ pointerEvents: "all" }}
-                    onClick={() => pluckString(i)}
-                    onTouchStart={(e) => { e.preventDefault(); pluckString(i); }}
+                    fill="transparent"
+                    style={{ pointerEvents: "none" }}
                   />
                   <path
                     d={stringPaths[i]}
@@ -718,6 +787,18 @@ export default function UkelelePage() {
                 </g>
               );
             })}
+
+            {/* Strum overlay — captures all pointer events across the string area */}
+            <rect
+              x={54} y={55} width={112} height={320}
+              fill="transparent"
+              cursor="pointer"
+              style={{ pointerEvents: "all", touchAction: "none" }}
+              onPointerDown={handleStrumPointerDown}
+              onPointerMove={handleStrumPointerMove}
+              onPointerUp={handleStrumPointerUp}
+              onPointerCancel={() => { strumStateRef.current = null; }}
+            />
 
             {/* String labels */}
             {STRING_DATA.map((s, i) => {
@@ -854,6 +935,8 @@ export default function UkelelePage() {
       )}
     </AnimatePresence>
 
+    <EqualizerPanel />
+
     {/* Milestone overlay */}
     <AnimatePresence>
       {milestoneMessage && (
@@ -910,6 +993,12 @@ export default function UkelelePage() {
     </AnimatePresence>
     </>
   );
+}
+
+function getStringIdxFromSvgX(svgX: number): number | null {
+  const idx = Math.round((svgX - 78) / 22);
+  if (idx < 0 || idx > 3) return null;
+  return idx;
 }
 
 function hexToRgb(hex: string): string {
