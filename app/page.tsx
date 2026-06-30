@@ -2,8 +2,10 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { useState, useCallback, useRef, useEffect } from "react";
+import Link from "next/link";
 import { playUkuleleNote, triggerHapticPluck } from "@/lib/ukuleleAudio";
 import EqualizerPanel from "@/components/EqualizerPanel";
+import { startSession, logEvent, endSession, getInactivityTimeoutMs } from "@/lib/practiceTracking";
 
 const STRING_DATA = [
   { note: "G", freq: 392.0, color: "#FF6B9D", type: "heart" as const },
@@ -162,11 +164,13 @@ export default function UkelelePage() {
   const ukeRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const strumStateRef = useRef<StrumState | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const spotlightOffsetRef = useRef(0);
   const mouseRef = useRef({ x: 0.3, y: 0.25 });
   const [stringPaths, setStringPaths] = useState<string[]>(
     STRING_DATA.map((_, i) => {
-      const x = 78 + i * 22;
+      const x = getStringX(i);
       return `M${x},55 L${x},355`;
     })
   );
@@ -179,6 +183,38 @@ export default function UkelelePage() {
       if (milestoneTimeoutRef.current) clearTimeout(milestoneTimeoutRef.current);
     };
   }, []);
+
+  // On React unmount, close any open session. Note: this won't catch hard tab closes
+  // or browser kills — only SPA unmounts. beforeunload fetch is unreliable across browsers.
+  useEffect(() => {
+    return () => {
+      if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+      if (sessionIdRef.current) {
+        endSession(sessionIdRef.current);
+        sessionIdRef.current = null;
+      }
+    };
+  }, []);
+
+  const recordInteraction = useCallback(
+    async (eventType: "note" | "chord" | "strum", label: string) => {
+      if (!sessionIdRef.current) {
+        const id = await startSession();
+        sessionIdRef.current = id;
+      }
+      if (sessionIdRef.current) {
+        logEvent(sessionIdRef.current, eventType, label);
+      }
+      if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+      inactivityTimerRef.current = setTimeout(() => {
+        if (sessionIdRef.current) {
+          endSession(sessionIdRef.current);
+          sessionIdRef.current = null;
+        }
+      }, getInactivityTimeoutMs());
+    },
+    []
+  );
 
   useEffect(() => {
     if (!mounted) return;
@@ -395,13 +431,13 @@ export default function UkelelePage() {
     const uke = ukeRef.current;
     if (!uke) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     const rect = uke.getBoundingClientRect();
-    const xRatio = (78 + stringIdx * 22) / 260;
+    const xRatio = getStringX(stringIdx) / 260;
     const yRatio = 220 / 500;
     return { x: rect.left + rect.width * xRatio, y: rect.top + rect.height * yRatio };
   }, []);
 
   const animateString = useCallback((idx: number) => {
-    const x = 78 + idx * 22;
+    const x = getStringX(idx);
     const rest = `M${x},55 L${x},355`;
     const frames = [
       `M${x},55 Q${x - 8},205 ${x},355`,
@@ -444,7 +480,8 @@ export default function UkelelePage() {
     emitParticles(idx, origin.x, origin.y);
 
     handleNoteCount(STRING_DATA[idx].color);
-  }, [emitParticles, getStringOrigin, handleNoteCount, animateString]);
+    recordInteraction("note", STRING_DATA[idx].note);
+  }, [emitParticles, getStringOrigin, handleNoteCount, animateString, recordInteraction]);
 
   const getSvgX = useCallback((clientX: number): number => {
     const svg = svgRef.current;
@@ -496,6 +533,7 @@ export default function UkelelePage() {
       state.stringsHit.forEach((idx, i) => {
         setTimeout(() => pluckString(idx, velocity), i * 30);
       });
+      recordInteraction("strum", "strum");
     } else {
       const idx = state.stringsHit[0] ?? null;
       if (idx !== null) {
@@ -503,7 +541,7 @@ export default function UkelelePage() {
         pluckString(idx, velocity);
       }
     }
-  }, [getSvgX, pluckString]);
+  }, [getSvgX, pluckString, recordInteraction]);
 
   const playChord = useCallback((chord: typeof CHORDS[0]) => {
     chord.freqs.forEach((freq, i) => {
@@ -522,7 +560,8 @@ export default function UkelelePage() {
     setBgPulseColor(chord.color);
     setTimeout(() => setBgPulseColor(null), 3000);
     showToast(`Acorde de ${chord.name} 🎵`);
-  }, [emitParticles, getStringOrigin, handleNoteCount, showToast, animateString]);
+    recordInteraction("chord", chord.name);
+  }, [emitParticles, getStringOrigin, handleNoteCount, showToast, animateString, recordInteraction]);
 
   if (!mounted) return <div className="min-h-screen bg-black" />;
 
@@ -570,7 +609,7 @@ export default function UkelelePage() {
           color: "transparent",
           margin: "4px 0 0",
         }}>
-          Ukelele Virtual
+          Ukelele de Leslie
         </h1>
 
         <motion.div
@@ -765,7 +804,7 @@ export default function UkelelePage() {
             {STRING_DATA.map((s, i) => {
               const isVib = vibratingStrings.has(i);
               const hitW = isMobile ? 28 : 24;
-              const x = 78 + i * 22;
+              const x = getStringX(i);
               return (
                 <g key={`string-${i}`}>
                   <rect
@@ -777,8 +816,9 @@ export default function UkelelePage() {
                     d={stringPaths[i]}
                     fill="none"
                     stroke={s.color}
-                    strokeWidth={isVib ? 2.5 : 1.5}
-                    opacity={isVib ? 1 : 0.6}
+                    strokeWidth={isVib ? 3.2 : 2.2}
+                    opacity={isVib ? 1 : 0.75}
+                    strokeLinecap="round"
                     style={{
                       filter: isVib ? `drop-shadow(0 0 4px ${s.color})` : "none",
                       transition: "opacity 0.1s, stroke-width 0.05s",
@@ -790,7 +830,7 @@ export default function UkelelePage() {
 
             {/* Strum overlay — captures all pointer events across the string area */}
             <rect
-              x={54} y={55} width={112} height={320}
+              x={89} y={55} width={81} height={320}
               fill="transparent"
               cursor="pointer"
               style={{ pointerEvents: "all", touchAction: "none" }}
@@ -802,7 +842,7 @@ export default function UkelelePage() {
 
             {/* String labels */}
             {STRING_DATA.map((s, i) => {
-              const x = 78 + i * 22;
+              const x = getStringX(i);
               return (
                 <g key={`slbl-${i}`}>
                   <rect x={x - 10} y={390} width={20} height={14} rx={7}
@@ -815,7 +855,7 @@ export default function UkelelePage() {
 
             {/* Ripple rings */}
             {Array.from(vibratingStrings).map((idx) => {
-              const cx = 78 + idx * 22;
+              const cx = getStringX(idx);
               return [0, 1, 2].map((ring) => (
                 <motion.circle
                   key={`ripple-${idx}-${ring}-${displayCount}`}
@@ -834,7 +874,7 @@ export default function UkelelePage() {
             {activeChordFrets && activeChordFrets.map((fretY, i) => (
               <motion.circle
                 key={`fglow-${i}`}
-                cx={78 + i * 22} cy={fretY}
+                cx={getStringX(i)} cy={fretY}
                 r={4}
                 fill={STRING_DATA[i].color}
                 initial={{ scale: 0, opacity: 0 }}
@@ -881,6 +921,19 @@ export default function UkelelePage() {
         <p style={{ fontFamily: "var(--font-body)", fontSize: 11, color: "rgba(255,255,255,0.2)", marginTop: 16 }}>
           Toca las cuerdas · toca los acordes · deja que la magia suceda
         </p>
+
+        <Link
+          href="/dashboard"
+          className="absolute bottom-4 left-4"
+          style={{
+            fontFamily: "var(--font-body)", fontSize: 11,
+            color: "rgba(255,255,255,0.2)", textDecoration: "none",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = "rgba(255,255,255,0.5)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = "rgba(255,255,255,0.2)"; }}
+        >
+          ☆ mi progreso
+        </Link>
 
         <button
           onClick={() => { noteCountRef.current = 0; setDisplayCount(0); particlesRef.current = []; }}
@@ -937,66 +990,66 @@ export default function UkelelePage() {
 
     <EqualizerPanel />
 
-    {/* Milestone overlay */}
+    {/* Milestone banner */}
     <AnimatePresence>
       {milestoneMessage && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 9998,
-            pointerEvents: 'none',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
+        <div style={{
+          position: 'fixed',
+          top: 124,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 9998,
+          pointerEvents: 'none',
+          width: 'max-content',
+          maxWidth: '85vw',
+        }}>
           <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.9, opacity: 0 }}
-            transition={{ type: 'tween', duration: 0.4 }}
+            key={milestoneMessage.title}
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ type: 'tween', duration: 0.3 }}
             style={{
-              background: 'rgba(0,0,0,0.85)',
-              backdropFilter: 'blur(24px)',
-              border: '1px solid rgba(212,83,126,0.4)',
-              borderRadius: 20,
-              padding: '32px 48px',
+              background: 'rgba(0,0,0,0.82)',
+              backdropFilter: 'blur(20px)',
+              border: '1px solid rgba(212,83,126,0.35)',
+              borderRadius: 999,
+              padding: '10px 24px',
               textAlign: 'center',
-              maxWidth: '80vw',
-              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
             }}
           >
-            <div style={{
+            <span style={{
               fontFamily: 'var(--font-heading)',
-              fontSize: 'clamp(1.5rem, 5vw, 2rem)',
+              fontSize: '1rem',
               color: 'white',
-              fontWeight: 300,
-              marginBottom: 8,
+              fontWeight: 400,
             }}>
               {milestoneMessage.title}
-            </div>
-            <div style={{
+            </span>
+            <span style={{
               fontFamily: 'var(--font-script)',
               fontStyle: 'italic',
-              fontSize: '1rem',
-              color: 'rgba(255,255,255,0.65)',
+              fontSize: '0.8rem',
+              color: 'rgba(255,255,255,0.6)',
+              marginLeft: 8,
             }}>
               {milestoneMessage.subtitle}
-            </div>
+            </span>
           </motion.div>
-        </motion.div>
+        </div>
       )}
     </AnimatePresence>
     </>
   );
 }
 
+function getStringX(i: number): number {
+  return 104 + i * 17;
+}
+
 function getStringIdxFromSvgX(svgX: number): number | null {
-  const idx = Math.round((svgX - 78) / 22);
+  const idx = Math.round((svgX - 104) / 17);
   if (idx < 0 || idx > 3) return null;
   return idx;
 }

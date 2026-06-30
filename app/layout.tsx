@@ -21,7 +21,7 @@ const playfair = Playfair_Display({
 })
 
 export const metadata: Metadata = {
-  title: 'Ukelele Virtual',
+  title: 'Ukelele de Leslie',
   description: 'Un ukelele virtual interactivo',
 }
 
